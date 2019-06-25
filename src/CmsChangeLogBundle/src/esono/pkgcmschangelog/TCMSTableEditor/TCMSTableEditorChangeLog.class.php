@@ -161,6 +161,10 @@ class TCMSTableEditorChangeLog extends TCMSTableEditorChangeLogAutoParent
             /** @var TCMSField $oldField */
             if (isset($oldFields[$newField->name])) {
                 $oldField = $oldFields[$newField->name];
+
+                if ($oldField instanceof TCMSMLTField) {
+                    $oldField->data = $oldField->getMltValues();
+                }
             } else {
                 if ($this->bIsUpdate) {
                     continue;
@@ -170,7 +174,11 @@ class TCMSTableEditorChangeLog extends TCMSTableEditorChangeLogAutoParent
             }
 
             $newField = clone $newField;
-            $newField->data = $newField->ConvertPostDataToSQL();
+            if ($newField instanceof TCMSMLTField) {
+                $newField->data = $newField->getMltValues();
+            } else {
+                $newField->data = $newField->ConvertPostDataToSQL();
+            }
 
             if (is_array($oldField->data)) {
                 if (isset($oldField->data['x']) && '-' === $oldField->data['x']) {

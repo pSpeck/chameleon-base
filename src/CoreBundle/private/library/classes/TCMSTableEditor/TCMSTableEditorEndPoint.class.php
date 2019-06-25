@@ -937,12 +937,20 @@ class TCMSTableEditorEndPoint
      */
     public function SaveField($sFieldName, $sFieldContent, $bTriggerPostSaveHook = false)
     {
+        if (!is_null($this->oTable)) {
+            $this->oTablePreChangeData = clone $this->oTable;
+        }
+
         $oPostTable = $this->GetNewTableObjectForEditor();
         $postData = array($sFieldName => $sFieldContent, 'id' => $this->sId);
         $oPostTable->DisablePostLoadHook(true);
         $oPostTable->LoadFromRow($postData);
 
         $oField = &$this->oTableConf->GetField($sFieldName, $oPostTable);
+
+        if (false === $oField->DataIsValid()) {
+            return $this->GetObjectShortInfo($postData);
+        }
 
         // overwrite the modifier type, because we definitely want to save the record field.
         $oField->oDefinition->sqlData['modifier'] = 'none';
@@ -974,6 +982,10 @@ class TCMSTableEditorEndPoint
      */
     public function SaveFields($aFieldData, $bTriggerPostSaveHook = false)
     {
+        if (!is_null($this->oTable)) {
+            $this->oTablePreChangeData = clone $this->oTable;
+        }
+
         $oPostTable = $this->GetNewTableObjectForEditor();
         $postData = $aFieldData;
         $postData['id'] = $this->sId;
@@ -1014,13 +1026,6 @@ class TCMSTableEditorEndPoint
     {
         /** @var TCMSMLTField $oField */
         $oField = $this->oTableConf->GetField($sFieldName, $this->oTable);
-
-        $sTargetTable = $oField->GetConnectedTableName();
-        $sTargetTableName = TCMSTableToClass::GetClassName('Tdb', $sTargetTable);
-        if (class_exists($sTargetTableName)) {
-            $oTargetTable = call_user_func(array($sTargetTableName, 'GetNewInstance'));
-            $oTargetTable->Load($sConnectedID);
-        }
 
         $this->RemoveMLTConnectionExecute($oField, $sConnectedID);
     }
@@ -2057,6 +2062,7 @@ class TCMSTableEditorEndPoint
     {
         $this->DeleteIdConnectedRecordReferences();
         $this->DeleteMltConnectedRecordReferences();
+        $this->deleteMultiTableRecordReferences($this->oTableConf->sqlData['name'], $this->sId);
     }
 
     /**
@@ -2086,6 +2092,102 @@ class TCMSTableEditorEndPoint
                 }
             }
         }
+    }
+
+    protected function deleteMultiTableRecordReferences(string $tableName, string $id = ''): void
+    {
+        $fieldTypeId = $this->getFieldTypeIdBySystemName(TCMSFieldExtendedLookupMultiTable::FIELD_SYSTEM_NAME);
+
+        if (null === $fieldTypeId) {
+            return;
+        }
+
+        $databaseConnection = $this->getDatabaseConnection();
+        $editLanguage = $this->getLanguageService()->getActiveEditLanguage();
+
+        $fieldConfigResult = $this->getFieldsOfType($fieldTypeId);
+
+        $recordedQueries = [];
+        foreach ($fieldConfigResult as $row) {
+            if (false === $this->hasMultiTableRecordReferences($row['tableName'], $row['fieldName'], $tableName, $id)) {
+                continue;
+            }
+
+            $updateQuery = '
+              UPDATE '.$databaseConnection->quoteIdentifier($row['tableName']).'
+                 SET '.$databaseConnection->quoteIdentifier($row['fieldName'].TCMSFieldExtendedLookupMultiTable::TABLE_NAME_FIELD_SUFFIX)." = '',
+                     ".$databaseConnection->quoteIdentifier($row['fieldName'])." = ''   
+               WHERE ".$databaseConnection->quoteIdentifier($row['fieldName'].TCMSFieldExtendedLookupMultiTable::TABLE_NAME_FIELD_SUFFIX).' = '.$databaseConnection->quote($tableName);
+
+            $setFields[$row['fieldName']] = '';
+            $setFields[$row['fieldName'].TCMSFieldExtendedLookupMultiTable::TABLE_NAME_FIELD_SUFFIX] = '';
+
+            $whereEquals[$row['fieldName'].TCMSFieldExtendedLookupMultiTable::TABLE_NAME_FIELD_SUFFIX] = $tableName;
+
+            if ('' !== $id) {
+                $updateQuery .= ' AND '.$databaseConnection->quoteIdentifier($row['fieldName']).' = '.$databaseConnection->quote($id);
+
+                $whereEquals[$row['fieldName']] = $id;
+            }
+
+            $databaseConnection->executeUpdate($updateQuery);
+
+            $migrationQueryData = new MigrationQueryData($row['tableName'], $editLanguage->fieldIso6391);
+            $migrationQueryData->setFields($setFields);
+            $migrationQueryData->setWhereEquals($whereEquals);
+
+            $recordedQueries[] = new LogChangeDataModel($migrationQueryData, LogChangeDataModel::TYPE_UPDATE);
+        }
+
+        if (count($recordedQueries) > 0) {
+            TCMSLogChange::WriteTransaction($recordedQueries);
+        }
+    }
+
+    protected function getFieldTypeIdBySystemName(string $systemName): ?string
+    {
+        $databaseConnection = $this->getDatabaseConnection();
+
+        $query = 'SELECT `id` FROM `cms_field_type` WHERE `constname` = '.$databaseConnection->quote($systemName);
+        $fieldTypeId = $databaseConnection->fetchColumn($query);
+
+        if (false === $fieldTypeId) {
+            return null;
+        }
+
+        return $fieldTypeId;
+    }
+
+    protected function getFieldsOfType(string $fieldTypeId): array
+    {
+        $databaseConnection = $this->getDatabaseConnection();
+
+        $fieldConfigQuery = '
+                  SELECT `cms_field_conf`.`name` AS fieldName,
+                         `cms_tbl_conf`.`name` AS tableName
+                    FROM `cms_field_conf` 
+               LEFT JOIN `cms_tbl_conf` ON `cms_tbl_conf`.`id` = `cms_field_conf`.`cms_tbl_conf_id` 
+                   WHERE `cms_field_conf`.`cms_field_type_id` = :fieldTypeId';
+
+        return $databaseConnection->fetchAll($fieldConfigQuery, ['fieldTypeId' => $fieldTypeId]);
+    }
+
+    protected function hasMultiTableRecordReferences(string $tableName, string $fieldName, string $deletedTableName, string $deletedRecordId = ''): bool
+    {
+        $databaseConnection = $this->getDatabaseConnection();
+
+        $relatedRecordsQuery = '
+                   SELECT `id`
+                     FROM '.$databaseConnection->quoteIdentifier($tableName).'
+                    WHERE '.$databaseConnection->quoteIdentifier($fieldName.TCMSFieldExtendedLookupMultiTable::TABLE_NAME_FIELD_SUFFIX).' = '.$databaseConnection->quote($deletedTableName);
+
+        if ('' !== $deletedRecordId) {
+            $relatedRecordsQuery .= ' AND '.$databaseConnection->quoteIdentifier($fieldName).' = '.$databaseConnection->quote($deletedRecordId);
+        }
+
+        $relatedRecordsResult = $databaseConnection->executeQuery($relatedRecordsQuery);
+
+        return $relatedRecordsResult->rowCount() > 0;
     }
 
     /**
@@ -2880,6 +2982,10 @@ class TCMSTableEditorEndPoint
      */
     protected function ActivateRecordRevision_Execute($oCMSRevisionToActivate)
     {
+        if (!is_null($this->oTable)) {
+            $this->oTablePreChangeData = clone $this->oTable;
+        }
+
         $aRevisionPostData = TTools::mb_safe_unserialize($oCMSRevisionToActivate->fieldData);
         $oDBRecordTable = $this->oTableConf->GetTableObjectInstance();
         $aRevisionPostData['id'] = $oCMSRevisionToActivate->fieldRecordid;

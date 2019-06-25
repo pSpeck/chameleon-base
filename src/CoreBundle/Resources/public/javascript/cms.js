@@ -87,7 +87,7 @@ function AjaxError(XMLHttpRequest, textStatus, errorThrown) {
                     top.document.location.href = window.location.pathname;
                 }
             } else {
-                alert(errorMessage);
+                toasterMessage(errorMessage, "ERROR");
             }
         }
     } else {
@@ -134,7 +134,8 @@ function toasterMessage(message,type) {
 window.alert = function(message) {
     new PNotify({
         title: "Alert",
-        text: message
+        text: message,
+        text_escape: true
     });
 };
 
@@ -408,3 +409,30 @@ function initLightBox(){
     });
 }
 
+CHAMELEON.CORE.handleFormAndLinkTargetsInModals = function () {
+    if (self === top) {
+        return;
+    }
+
+    if (0 === $('.ui-dialog', top.document).length) {
+        return;
+    }
+
+    $("form[target='_top']").each(function() {
+        $(this).attr('target', '');
+        $(this).find("input[name='pagedef'][value='tableeditor']").each(function() {
+            $(this).val('tableeditorPopup');
+        });
+
+        $(this).find("input[name='pagedef'][value='tablemanager']").each(function() {
+            $(this).val('tablemanagerframe');
+        });
+    });
+
+    $("a[target='_top']").each(function() {
+        $(this).attr('target', '');
+
+        var link = $(this).attr('href').replace('pagedef=tableeditor', 'pagedef=tableeditorPopup');
+        $(this).attr('href', link);
+    });
+};
